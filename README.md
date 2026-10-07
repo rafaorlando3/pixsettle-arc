@@ -1,5 +1,9 @@
 # PixSettle Ledger on Arc
 
+Settle Pix orders once in USDC on Arc: replay-safe, refund-aware, with a public dashboard linked to the explorer.
+
+Shops on the Brazil–Paraguay border sell to Brazilian customers who pay with Pix and reconcile by hand: which transfer is which order, which Pix was refunded, which one came back as a claim. Settling the merchant's net amount in USDC needs a ledger that pays once, survives replays and holds funds while a refund case is open.
+
 USDC settlement on [Arc](https://docs.arc.io) for small-business orders paid by **Pix**, Brazil's instant payment system, with the exception rules that cross-border merchants actually run into enforced on-chain.
 
 It is the EVM settlement layer of [PixSettle](https://github.com/rafaorlando3/pixsettle), a reconciliation and exception-handling service for merchants on the Brazil and Paraguay border. In this repository the Pix side is **simulated off-chain**: no real Pix provider, bank or customer data is involved.
@@ -56,6 +60,8 @@ Arc mainnet (chain ID 5042):
 - Deployment block: **24681974**
 - Runtime code: **4,357 bytes**
 
+The deployment and all ten demo transactions together cost **0.0378830020592629 USDC** in gas (**about 0.04 USDC**), calculated on 2026-10-07 by summing `gasUsed × effectiveGasPrice` from the eleven successful transaction receipts and converting the native 18-decimal gas unit to USDC. This is the cost of this recorded run, not a quote for future transactions.
+
 A separate read-only verification on 2026-10-07 matched the deployed runtime byte for byte with the compiled v5 artifact (solc 0.8.24, optimizer 200 runs, evmVersion paris; the only filled positions are the three immutable references to the USDC address). It also checked the deployment receipt and constructor arguments, all ten demo transactions (sender, nonce, target, calldata and successful receipt), the expected ledger events, and the final order states. It does not prove real Pix payments: the Pix side remains simulated.
 
 | Demo step | Transaction |
@@ -73,7 +79,11 @@ A separate read-only verification on 2026-10-07 matched the deployed runtime byt
 
 ## Team
 
-Rafael Orlando Mendes leads the project, defines the problem and exception rules, and reviews delivery. The demonstration uses fictional orders and simulated Pix events.
+Rafael Orlando Mendes leads the project, defines the problem and exception rules, and reviews delivery. Based in Pedro Juan Caballero, Paraguay, on the Brazilian border, where the problem comes from. The demonstration uses fictional orders and simulated Pix events.
+
+## Roadmap
+
+Next with this grant: connect a licensed Pix provider sandbox as the event source, add the MED claim flow as an on-chain hold, and ship the merchant view of the dashboard. These are planned extensions, not features of the current demo.
 
 ## License
 

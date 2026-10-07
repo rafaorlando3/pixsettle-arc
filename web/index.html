@@ -1,0 +1,226 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>PixSettle Ledger on Arc</title>
+<style>
+  :root { --bg:#f7f7f5; --fg:#1d1d1b; --mut:#66665f; --line:#d9d9d2; --card:#fff; --ok:#1f7a4d; --warn:#9a5b00; --bad:#a3262a; --acc:#2450a6; }
+  @media (prefers-color-scheme: dark) { :root { --bg:#141413; --fg:#ececea; --mut:#a3a39b; --line:#33332f; --card:#1d1d1b; --ok:#5cc28f; --warn:#e0a84a; --bad:#ec7d80; --acc:#86a8ec; } }
+  * { box-sizing: border-box; }
+  [hidden] { display: none !important; }
+  body { margin:0; background:var(--bg); color:var(--fg); font:15px/1.5 system-ui, -apple-system, Segoe UI, sans-serif; }
+  main { max-width: 960px; margin: 0 auto; padding: 24px 16px 48px; }
+  h1 { font-size: 22px; margin: 0 0 4px; }
+  p.lead { color: var(--mut); margin: 0 0 20px; }
+  form { display:grid; grid-template-columns: 140px 1fr 140px auto; gap:8px; margin-bottom: 16px; }
+  @media (max-width: 640px) { form { grid-template-columns: 1fr; } }
+  input, select, button { font: inherit; padding: 8px 10px; border:1px solid var(--line); border-radius:6px; background:var(--card); color:var(--fg); min-width:0; }
+  button { background: var(--acc); color:#fff; border-color: var(--acc); cursor:pointer; }
+  .cards { display:grid; grid-template-columns: repeat(auto-fit, minmax(150px,1fr)); gap:8px; margin-bottom:16px; }
+  .card { background:var(--card); border:1px solid var(--line); border-radius:8px; padding:10px 12px; }
+  .card b { display:block; font-size:20px; font-variant-numeric: tabular-nums; }
+  .card span { color: var(--mut); font-size: 13px; }
+  .wrap { overflow-x:auto; border:1px solid var(--line); border-radius:8px; background:var(--card); }
+  table { border-collapse: collapse; width:100%; font-size: 14px; }
+  th, td { text-align:left; padding:8px 10px; border-bottom:1px solid var(--line); white-space:nowrap; }
+  th { color: var(--mut); font-weight:600; }
+  td.num { text-align:right; font-variant-numeric: tabular-nums; }
+  code { font-family: ui-monospace, Menlo, monospace; font-size: 13px; }
+  .Settled { color: var(--ok); } .Exposure, .RefundOpen { color: var(--warn); } .Closed { color: var(--mut); }
+  #status { color: var(--mut); min-height: 1.5em; margin: 8px 0; }
+  #status.err { color: var(--bad); }
+  #cov { font-size: 13px; color: var(--mut); margin: 0 0 12px; overflow-wrap: anywhere; }
+  #cov.partial { color: var(--warn); }
+  a { color: var(--acc); }
+  footer { color: var(--mut); font-size: 13px; margin-top: 24px; }
+</style>
+</head>
+<body>
+<main>
+  <h1>PixSettle Ledger on Arc</h1>
+  <p class="lead">USDC settlement for orders paid by Pix (simulated off-chain), with the exception rules enforced on-chain: one settlement per order, idempotent replays, refunds that block settlement, and post-settlement refunds tracked as exposure until the merchant returns the funds. Read-only: this page only calls <code>eth_blockNumber</code>, <code>eth_getCode</code> and <code>eth_getLogs</code> on a public Arc RPC. Every number below covers only the block range that was read. It is the whole contract history only when the address and start block match the deploy published in this page; otherwise the page says the earlier history was not checked.</p>
+
+  <form id="f">
+    <select id="net" aria-label="Network">
+      <option value="mainnet">Arc mainnet</option>
+      <option value="testnet">Arc testnet</option>
+    </select>
+    <input id="addr" placeholder="Ledger contract address 0x..." aria-label="Ledger address" spellcheck="false">
+    <input id="from" placeholder="From block" aria-label="From block (required; use the deploy block for full history)" inputmode="numeric">
+    <button type="submit">Load</button>
+  </form>
+  <div id="status" role="status"></div>
+  <div id="cov" hidden></div>
+
+  <div class="cards" id="cards" hidden>
+    <div class="card"><b id="cSettled">0</b><span>settled in range</span></div>
+    <div class="card"><b id="cVolume">0</b><span>USDC paid in range</span></div>
+    <div class="card"><b id="cReplay">0</b><span>replays absorbed in range</span></div>
+    <div class="card"><b id="cExposure">0</b><span>open exposure seen in range (USDC)</span></div>
+    <div class="card"><b id="cReturned">0</b><span>exposure returned in range (USDC)</span></div>
+  </div>
+
+  <div class="wrap" id="tw" hidden>
+    <table>
+      <thead><tr><th>Order</th><th>State</th><th>Merchant</th><th class="num">USDC</th><th>Receipt digest</th><th>Last tx</th></tr></thead>
+      <tbody id="rows"></tbody>
+    </table>
+  </div>
+
+  <footer>Source and tests: see the repository README. USDC amounts use the Arc USDC ERC-20 interface (6 decimals), never the 18-decimal native gas unit.</footer>
+</main>
+<script>
+const NETS = {
+  mainnet: { rpc: "https://rpc.mainnet.arc.io", explorer: "https://explorer.arc.io" },
+  testnet: { rpc: "https://rpc.testnet.arc.io", explorer: "https://explorer.testnet.arc.io" },
+};
+// Published deploy, filled only after the A4 deploy is checked from outside (address, deploy block and the
+// creation tx). Code at an address proves a contract exists, not that it is this ledger with Arc USDC.
+const PUBLISHED = { mainnet: { address: "0x642396a0279107b256c4ad62e219e6b9678916b0", deployBlock: 24681974n, deployTx: "0xb18a12f00f2bdc52fbc5a89d6ed007d6e51ffa78dd233f354f16b8b5ab57cdc3" }, testnet: null }; // e.g. { address: "0x...", deployBlock: 123n, deployTx: "0x..." }
+// v2 event signatures (Settled and ExposureReturned carry paidFrom).
+const T = {
+  Settled: "0xce666fc96125ee0c98c995079bb3bed09e456f7b847f5c79b7cb7deea5263c60",
+  SettlementReplayed: "0x86fe0e78436a37c284642c5a2154123665534aac6670aba4f49e81ddecddaf24",
+  RefundCaseOpened: "0xd90c895a10cdd40c1846141f3a361317b979225632fdd64d5e4b75c887cf35bb",
+  RefundCaseClosed: "0x06a6dcf354802c317f3313391a706fd1110a457a19cec50a3670fbb03343e8ea",
+  ExposureReturned: "0x8f6e9ac01d4b2b4be56a4d3125776b141f75df197d006eb68bf96eb1c469f01b",
+};
+const CHUNK = 10000n, MAX_REQUESTS = 400, MAX_LOGS = 50000; // 400 is a cap on RPC requests, not on orders
+const $ = (id) => document.getElementById(id);
+const short = (h) => h.slice(0, 10) + "…" + h.slice(-6);
+const word = (data, i) => "0x" + data.slice(2 + 64 * i, 2 + 64 * (i + 1));
+const esc = (s) => String(s).replace(/[&<>"']/g, (c) => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;" }[c]));
+// Exact decimal formatting of 6-decimal base units (no Number conversion).
+const usdc = (v) => { const n = v < 0n ? -v : v; const i = n / 1000000n, f = (n % 1000000n).toString().padStart(6, "0").replace(/0{1,4}$/, "");
+  return (v < 0n ? "-" : "") + i.toString().replace(/\B(?=(\d{3})+(?!\d))/g, ",") + "." + (f.length < 2 ? f.padEnd(2, "0") : f); };
+
+async function rpc(url, method, params, signal) {
+  const r = await fetch(url, { method: "POST", signal, headers: { "content-type": "application/json" }, body: JSON.stringify({ jsonrpc: "2.0", id: 1, method, params }) });
+  if (!r.ok) throw new Error(`RPC HTTP ${r.status}`);
+  const j = await r.json();
+  if (j.error) throw new Error(j.error.message || "RPC error");
+  return j.result;
+}
+
+function clearView() {
+  $("cards").hidden = true; $("tw").hidden = true; $("rows").innerHTML = ""; $("cov").hidden = true; $("cov").textContent = "";
+  for (const id of ["cSettled", "cVolume", "cReplay", "cExposure", "cReturned"]) $(id).textContent = "0";
+}
+
+// An order is "partial" when its first event in the range is not one that starts an order's history
+// (Settled, or a refund case opened before settlement). Its state and amount may depend on earlier blocks.
+function apply(orders, log, c) {
+  const t0 = log.topics[0], ref = log.topics[1];
+  let o = orders.get(ref);
+  if (!o) {
+    const opensBefore = t0 === T.RefundCaseOpened && BigInt(word(log.data, 0)) === 0n;
+    const gap = !(t0 === T.Settled || opensBefore);
+    // With a gap the state before the range is not observed. "None" (never settled) cannot be inferred from a
+    // replay, a close or a return, so the order starts as Unknown and only an event that implies a state moves it.
+    o = { ref, state: gap ? "Unknown" : "None", merchant: "", amount: null, receipt: "", tx: "", gap };
+  }
+  o.tx = log.transactionHash;
+  if (t0 === T.Settled) {
+    o.state = "Settled"; o.merchant = "0x" + log.topics[3].slice(26);
+    o.amount = BigInt(word(log.data, 0)); o.receipt = word(log.data, 1);
+    c.settled++; c.volume += o.amount;
+  } else if (t0 === T.SettlementReplayed) {
+    c.replay++; // a replay never changes the state; a tracked order keeps it, a gap order stays Unknown
+  } else if (t0 === T.RefundCaseOpened) {
+    const after = BigInt(word(log.data, 0)) === 1n;
+    if (after && o.amount === null) o.gap = true;
+    o.state = after ? "Exposure" : "RefundOpen";
+  } else if (t0 === T.RefundCaseClosed) {
+    const refunded = BigInt(word(log.data, 0)) === 1n;
+    if (o.state === "RefundOpen") o.state = refunded ? "Closed" : "None";
+    else if (o.state === "Exposure" && !refunded) o.state = "Settled";
+    else if (refunded) o.state = "Closed";
+    else o.state = "Unknown";
+  } else if (t0 === T.ExposureReturned) {
+    c.returned += BigInt(word(log.data, 0));
+  }
+  orders.set(ref, o);
+}
+
+let current = 0, controller = null; // only the latest load may touch the page
+async function load(net, addr, from) {
+  const seq = ++current;
+  if (controller) controller.abort();
+  controller = new AbortController();
+  const signal = controller.signal;
+  const live = () => seq === current;
+  const st = $("status"); st.className = ""; st.textContent = "Loading…";
+  clearView();
+  try {
+    if (!NETS[net]) throw new Error("Unknown network.");
+    if (!/^0x[0-9a-fA-F]{40}$/.test(addr)) throw new Error("Enter a valid contract address.");
+    if (!/^[0-9]+$/.test(from)) throw new Error("Enter the start block (a non-negative integer); the deploy block gives the full history.");
+    const { rpc: url, explorer } = NETS[net];
+    const code = await rpc(url, "eth_getCode", [addr, "latest"], signal);
+    if (!live()) return;
+    if (!code || code === "0x") throw new Error("No contract code at this address on " + net + ".");
+    const latest = BigInt(await rpc(url, "eth_blockNumber", [], signal));
+    if (!live()) return;
+    const start = BigInt(from);
+    if (start > latest) throw new Error(`Start block ${start} is after the latest block ${latest}.`);
+    const requests = Number((latest - start) / CHUNK) + 1;
+    if (requests > MAX_REQUESTS) throw new Error(`Range needs ${requests} RPC requests (limit ${MAX_REQUESTS}). Check the start block.`);
+    const logs = [];
+    for (let a = start; a <= latest; a += CHUNK) {
+      const b = a + CHUNK - 1n > latest ? latest : a + CHUNK - 1n;
+      st.textContent = `Loading blocks ${a} to ${b} of ${latest}…`;
+      const part = await rpc(url, "eth_getLogs", [{ address: addr, fromBlock: "0x" + a.toString(16), toBlock: "0x" + b.toString(16), topics: [Object.values(T)] }], signal);
+      if (!live()) return;
+      logs.push(...part);
+      if (logs.length > MAX_LOGS) throw new Error(`More than ${MAX_LOGS} events; this page is a demo viewer.`);
+    }
+    logs.sort((x, y) => { const d = BigInt(x.blockNumber) - BigInt(y.blockNumber); return d !== 0n ? (d < 0n ? -1 : 1) : (BigInt(x.logIndex) < BigInt(y.logIndex) ? -1 : 1); });
+    const orders = new Map(), c = { settled: 0, volume: 0n, replay: 0, returned: 0n };
+    for (const l of logs) apply(orders, l, c);
+    let exposure = 0n, gaps = 0;
+    const rows = [...orders.values()].reverse().map((o) => {
+      if (o.gap) gaps++;
+      if (o.state === "Exposure" && o.amount !== null) exposure += o.amount;
+      const state = o.gap ? (o.state === "Unknown" ? "Unknown" : o.state + " (history before range)") : o.state;
+      return `<tr><td><code>${short(o.ref)}</code></td><td class="${esc(o.state)}">${esc(state)}</td><td><code>${o.merchant ? short(o.merchant) : "-"}</code></td>` +
+        `<td class="num">${o.amount !== null ? usdc(o.amount) : "unknown"}</td><td><code>${o.receipt ? short(o.receipt) : "-"}</code></td>` +
+        `<td><a href="${explorer}/tx/${esc(o.tx)}" target="_blank" rel="noopener">${short(o.tx)}</a></td></tr>`;
+    });
+    const pub = PUBLISHED[net];
+    const full = !!pub && pub.address.toLowerCase() === addr.toLowerCase() && start <= pub.deployBlock;
+    const partial = !full || gaps > 0;
+    $("rows").innerHTML = rows.join("") || `<tr><td colspan="6">No events in blocks ${start} to ${latest}. This is not a zero balance for the contract${full ? "" : ": earlier blocks were not read"}.</td></tr>`;
+    $("cSettled").textContent = c.settled; $("cVolume").textContent = usdc(c.volume); $("cReplay").textContent = c.replay;
+    $("cExposure").textContent = !full && orders.size === 0 ? "unknown" : (gaps ? usdc(exposure) + " +?" : usdc(exposure));
+    $("cReturned").textContent = usdc(c.returned);
+    $("cards").hidden = false; $("tw").hidden = false;
+    const at = new Date().toISOString();
+    $("cov").className = partial ? "partial" : "";
+    $("cov").textContent = (full
+      ? `Full history: from the published deploy block ${pub.deployBlock} (creation tx ${short(pub.deployTx)}).`
+      : `Range only: blocks ${start} to ${latest}. History before block ${start} was not checked, so totals and exposure may be incomplete.`)
+      + (gaps ? ` ${gaps} order(s) have events whose start is before block ${start}; their state or amount may be unknown.` : "")
+      + ` Read at ${at} from ${url}.`;
+    $("cov").hidden = false;
+    st.textContent = `${logs.length} events, blocks ${start} to ${latest}.`;
+    if (gaps) st.className = "err";
+    history.replaceState(null, "", `?net=${net}&address=${addr}&from=${start}`);
+  } catch (e) {
+    if (!live()) return; // an older load never overwrites a newer one, not even with its error
+    clearView(); st.className = "err"; st.textContent = e.name === "AbortError" ? "Cancelled." : e.message;
+  }
+}
+
+const q = new URLSearchParams(location.search);
+if (q.get("net") && NETS[q.get("net")]) $("net").value = q.get("net");
+const publishedDefault = PUBLISHED[$("net").value];
+if (q.get("address")) $("addr").value = q.get("address");
+else if (publishedDefault) $("addr").value = publishedDefault.address;
+if (q.get("from")) $("from").value = q.get("from");
+else if (publishedDefault && $("addr").value.toLowerCase() === publishedDefault.address.toLowerCase()) $("from").value = publishedDefault.deployBlock.toString();
+$("f").addEventListener("submit", (e) => { e.preventDefault(); load($("net").value, $("addr").value.trim(), $("from").value.trim()); });
+if ($("addr").value && $("from").value) load($("net").value, $("addr").value.trim(), $("from").value.trim());
+</script>
+</body>
+</html>
